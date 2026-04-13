@@ -5,8 +5,8 @@
 | Jméno | Role |
 |---|---|
 | Jan Maláč | PDM driver, top-level |
-| Peter Rafaelis | PDM filtr, testbench |
-| Marek Raus | LED bar driver, dokumentace |
+| Peter Rafaelis | PDM filtr, sensitivity_ctrl, testbench |
+| Marek Raus | LED bar, peak_hold, dokumentace |
 
 ---
 
@@ -23,14 +23,27 @@
 
 ## Cíl projektu
 
-Cílem projektu je zobrazení intenzity zvukového signálu v reálném čase pomocí 16 LED na desce Nexys A7-50T. Deska obsahuje zabudovaný MEMS mikrofon s PDM (Pulse Density Modulation) rozhraním. FPGA čte 1-bitový PDM datový tok, zpracuje ho pomocí akumulátorového filtru a výslednou amplitudu zobrazí jako sloupcový VU metr na LED.
+Cílem projektu je zobrazení intenzity zvukového signálu v reálném čase pomocí 16 LED na desce Nexys A7-50T. Deska obsahuje zabudovaný MEMS mikrofon s PDM (Pulse Density Modulation) rozhraním. FPGA čte 1-bitový PDM datový tok, zpracuje ho decimačním filtrem a výslednou amplitudu zobrazí jako sloupcový VU metr na LED. Uživatel může pomocí tlačítek měnit citlivost a režim zobrazení.
 
 ### Základní funkce
 
 - Čtení PDM dat z onboard MEMS mikrofonu
 - Decimační filtr (akumulátor) pro převod PDM → amplituda
-- Zobrazení hlasitosti na 16x LED (čím víc LED svítí, tím víc hluku)
-- Reset tlačítkem BTNC
+- Zobrazení hlasitosti na 16x LED jako VU metr
+- Nastavitelná citlivost mikrofonu tlačítky BTNL / BTNR
+- Režim Peak Hold – LED drží poslední maximum, přepíná BTNU
+- Reset peak hodnoty tlačítkem BTND
+- Reset celého systému tlačítkem BTNC
+
+### Ovládání tlačítky
+
+| Tlačítko | Pin | Funkce |
+|---|---|---|
+| **BTNC** | N17 | Reset – výchozí stav (citlivost střední, peak hold vypnutý) |
+| **BTNL** | P17 | Snížení citlivosti – reaguje méně na slabé zvuky |
+| **BTNR** | M17 | Zvýšení citlivosti – reaguje více na slabé zvuky |
+| **BTNU** | M18 | Zapnutí / vypnutí režimu Peak Hold |
+| **BTND** | P18 | Ruční reset peak hold hodnoty |
 
 ---
 
@@ -38,52 +51,63 @@ Cílem projektu je zobrazení intenzity zvukového signálu v reálném čase po
 
 ### Blokové schéma
 
+*Viz soubor `img/block_diagram.png`*
+
 ```
-                        ┌──────────────────────────────────────┐
-                        │            TOP LEVEL                 │
-                        │                                      │
-  CLK (100 MHz) ───────►│  clk_en ──► pdm_driver ──► MIC_CLK │──► MIC_CLK
-                        │                 │                    │
-                        │           MIC_DATA ◄────────────────│◄── MIC_DATA
-                        │                 │                    │
-                        │           pdm_filter                 │
-                        │                 │                    │
-                        │        amplitude_meter               │
-                        │                 │                    │
-  RST (BTNC) ──────────►│           led_bar ──────────────────│──► LED[15:0]
-                        └──────────────────────────────────────┘
+                     ┌──────────────────────────────────────────────────┐
+                     │                    TOP LEVEL                     │
+                     │                                                  │
+ CLK (100 MHz) ─────►│  clk_en ──► pdm_driver ──────────► MIC_CLK    │──► MIC_CLK
+                     │                  │                               │
+                     │            MIC_DATA ◄──────────────────────────│◄── MIC_DATA
+                     │                  │                               │
+                     │   BTNL/BTNR ──► debounce ──► sensitivity_ctrl   │
+                     │                                      │ window    │
+                     │                             pdm_filter           │
+                     │                                      │ pcm_data  │
+                     │   BTNU/BTND ──► debounce ──► peak_hold          │
+                     │                                      │ level     │
+                     │                               led_bar ──────────│──► LED[15:0]
+                     │                                                  │
+ RST (BTNC) ────────►│                                                  │
+                     └──────────────────────────────────────────────────┘
 ```
 
 ### Popis modulů
 
 | Modul | Soubor | Popis |
 |---|---|---|
-| `pdm_driver` | `src/pdm_driver.vhd` | Generuje clock pro mikrofon (~3.125 MHz), čte 1-bit PDM data |
-| `pdm_filter` | `src/pdm_filter.vhd` | Akumulátor – sečte '1' za okno 64 vzorků → hodnota amplitudy |
-| `led_bar` | `src/led_bar.vhd` | Převede amplitudu (0–64) na počet rozsvícených LED (0–16) |
 | `clk_en` | `src/clk_en.vhd` | Standardní lab komponenta – hodinový enable |
+| `debounce` | `src/debounce.vhd` | Ošetření zákmitů pro všechna tlačítka |
+| `pdm_driver` | `src/pdm_driver.vhd` | Generuje clock pro mikrofon (~3.125 MHz), čte PDM data |
+| `sensitivity_ctrl` | `src/sensitivity_ctrl.vhd` | Mění velikost okna filtru dle tlačítek BTNL/BTNR |
+| `pdm_filter` | `src/pdm_filter.vhd` | Akumulátor – počítá '1' za nastavitelné okno vzorků |
+| `peak_hold` | `src/peak_hold.vhd` | Drží maximální hodnotu, přepíná BTNU, resetuje BTND |
+| `led_bar` | `src/led_bar.vhd` | Převede amplitudu 0–255 na 0–16 LED, bliká při peak hold |
 | `top_level` | `src/top_level.vhd` | Propojení všech modulů |
 
 ### Příprava .XDC souboru
-
-Namapované piny na Nexys A7-50T:
 
 | Signál | Pin | Popis |
 |---|---|---|
 | `clk` | E3 | 100 MHz hlavní hodiny |
 | `rst` | N17 | Reset (BTNC) |
+| `btn_l_i` | P17 | Snížení citlivosti (BTNL) |
+| `btn_r_i` | M17 | Zvýšení citlivosti (BTNR) |
+| `btn_u_i` | M18 | Peak Hold on/off (BTNU) |
+| `btn_d_i` | P18 | Reset peak hold (BTND) |
 | `mic_clk_o` | J5 | Clock do MEMS mikrofonu |
 | `mic_data_i` | H5 | PDM data z mikrofonu |
-| `mic_lr_sel_o` | F5 | Výběr kanálu (L/R), fixně '0' |
-| `led_o[0..15]` | H17..T14 | 16x LED |
+| `mic_lr_sel_o` | F5 | Výběr kanálu (L/R) |
+| `led_o[0..15]` | H17..V11 | 16x LED |
 
 ---
 
 ## Lab 2: Unit Design
 
-### pdm_driver
+### debounce
 
-Generuje clock pro mikrofon (dělení 100 MHz / 32 = 3.125 MHz) a čte PDM data na každou náběžnou hranu.
+Ošetřuje zákmity mechanických tlačítek. Vzorkuje vstup každé 2 ms pomocí posuvného registru a propustí stabilní hodnotu jako jednorázový pulz.
 
 #### Porty
 
@@ -91,77 +115,97 @@ Generuje clock pro mikrofon (dělení 100 MHz / 32 = 3.125 MHz) a čte PDM data 
 |---|---|---|---|
 | `clk` | in | std_logic | Hlavní hodiny 100 MHz |
 | `rst` | in | std_logic | Synchronní reset, active high |
-| `mic_clk_o` | out | std_logic | Clock do mikrofonu |
-| `mic_lr_sel_o` | out | std_logic | Výběr kanálu (fixně '0') |
-| `mic_data_i` | in | std_logic | PDM data z mikrofonu |
-| `pdm_data_o` | out | std_logic | Vzorkovaný PDM bit |
-| `pdm_valid_o` | out | std_logic | Pulz = nový platný bit |
+| `btn_i` | in | std_logic | Surový vstup tlačítka |
+| `btn_o` | out | std_logic | Ošetřený výstup – 1 pulz na 1 stisk |
 
 #### VHDL kód
+
+```vhdl
+entity debounce is
+    generic (
+        G_MAX : positive := 200_000  -- 2 ms @ 100 MHz; pro simulaci použij 2
+    );
+    port (
+        clk   : in  std_logic;
+        rst   : in  std_logic;
+        btn_i : in  std_logic;
+        btn_o : out std_logic
+    );
+end entity debounce;
+```
+
+---
+
+### pdm_driver
+
+Generuje clock pro mikrofon (100 MHz / 32 = 3.125 MHz) a čte PDM bity na každou náběžnou hranu mic_clk.
+
+#### Porty
+
+| Port | Směr | Typ | Popis |
+|---|---|---|---|
+| `clk` | in | std_logic | Hlavní hodiny 100 MHz |
+| `rst` | in | std_logic | Synchronní reset |
+| `mic_clk_o` | out | std_logic | Clock do mikrofonu |
+| `mic_lr_sel_o` | out | std_logic | Výběr kanálu – fixně '0' (levý) |
+| `mic_data_i` | in | std_logic | PDM data z mikrofonu |
+| `pdm_data_o` | out | std_logic | Vzorkovaný PDM bit |
+| `pdm_valid_o` | out | std_logic | '1' = nový platný PDM bit |
+
+#### VHDL kód
+
 ```vhdl
 entity pdm_driver is
     generic (
-        G_CLK_DIV : positive := 32  --! Clock divider (100 MHz / 32 = 3.125 MHz)
+        G_CLK_DIV : positive := 32  -- 100MHz / 32 = 3.125 MHz
     );
     port (
-        clk          : in  std_logic;  --! Main clock 100 MHz
-        rst          : in  std_logic;  --! High-active synchronous reset
-        mic_clk_o    : out std_logic;  --! Clock output to microphone
-        mic_lr_sel_o : out std_logic;  --! Channel select: '0' = left
-        mic_data_i   : in  std_logic;  --! PDM data from microphone
-        pdm_data_o   : out std_logic;  --! Sampled PDM bit
-        pdm_valid_o  : out std_logic   --! Single-cycle pulse = new valid bit
+        clk          : in  std_logic;
+        rst          : in  std_logic;
+        mic_clk_o    : out std_logic;
+        mic_lr_sel_o : out std_logic;
+        mic_data_i   : in  std_logic;
+        pdm_data_o   : out std_logic;
+        pdm_valid_o  : out std_logic
     );
 end entity pdm_driver;
--------------------------------------------------
-architecture Behavioral of pdm_driver is
+```
 
-    signal sig_cnt     : integer range 0 to G_CLK_DIV - 1 := 0;
-    signal sig_clk_div : std_logic := '0';
+---
 
-begin
+### sensitivity_ctrl
 
-    --! Always use left channel
-    mic_lr_sel_o <= '0';
+Nastavuje velikost okna filtru. BTNR zvyšuje citlivost (menší okno), BTNL ji snižuje (větší okno). 5 kroků po 32, rozsah 32–224.
 
-    --! Divide main clock and sample PDM data on rising edge of mic_clk
-    p_clk_div : process (clk) is
-    begin
-        if rising_edge(clk) then
-            if rst = '1' then
-                sig_cnt     <= 0;
-                sig_clk_div <= '0';
-                pdm_data_o  <= '0';
-                pdm_valid_o <= '0';
-            else
-                pdm_valid_o <= '0';  -- Default: no valid pulse
+#### Porty
 
-                if sig_cnt = G_CLK_DIV - 1 then
-                    sig_cnt     <= 0;
-                    sig_clk_div <= not sig_clk_div;
+| Port | Směr | Typ | Popis |
+|---|---|---|---|
+| `clk` | in | std_logic | Hlavní hodiny |
+| `rst` | in | std_logic | Synchronní reset |
+| `btn_up_i` | in | std_logic | BTNR – zvýšení citlivosti |
+| `btn_dn_i` | in | std_logic | BTNL – snížení citlivosti |
+| `window_o` | out | std_logic_vector(7 downto 0) | Velikost okna (32–224) |
 
-                    -- Sample data on rising edge of mic_clk (when clk_div goes 0->1)
-                    if sig_clk_div = '0' then
-                        pdm_data_o  <= mic_data_i;
-                        pdm_valid_o <= '1';
-                    end if;
-                else
-                    sig_cnt <= sig_cnt + 1;
-                end if;
-            end if;
-        end if;
-    end process p_clk_div;
+#### VHDL kód
 
-    mic_clk_o <= sig_clk_div;
-
-end architecture Behavioral;
+```vhdl
+entity sensitivity_ctrl is
+    port (
+        clk      : in  std_logic;
+        rst      : in  std_logic;
+        btn_up_i : in  std_logic;
+        btn_dn_i : in  std_logic;
+        window_o : out std_logic_vector(7 downto 0)
+    );
+end entity sensitivity_ctrl;
 ```
 
 ---
 
 ### pdm_filter
 
-Jednoduchý decimační akumulátor – počítá '1' v okně 64 PDM bitů. Výsledek odpovídá amplitudě signálu.
+Akumulátor počítá jedničky za okno N PDM bitů. Velikost okna určuje `sensitivity_ctrl`. Výsledek odpovídá amplitudě signálu.
 
 #### Porty
 
@@ -169,83 +213,39 @@ Jednoduchý decimační akumulátor – počítá '1' v okně 64 PDM bitů. Výs
 |---|---|---|---|
 | `clk` | in | std_logic | Hlavní hodiny |
 | `rst` | in | std_logic | Synchronní reset |
-| `pdm_data_i` | in | std_logic | PDM bit ze driveru |
+| `window_i` | in | std_logic_vector(7 downto 0) | Velikost okna ze sensitivity_ctrl |
+| `pdm_data_i` | in | std_logic | PDM bit z driveru |
 | `pdm_valid_i` | in | std_logic | Platný PDM bit |
-| `pcm_data_o` | out | unsigned(6 downto 0) | Výstupní amplituda (0–64) |
-| `pcm_valid_o` | out | std_logic | Pulz = nová hodnota amplitudy |
+| `pcm_data_o` | out | std_logic_vector(7 downto 0) | Amplituda 0–255 |
+| `pcm_valid_o` | out | std_logic | Nová platná hodnota |
 
 #### VHDL kód
 
 ```vhdl
 entity pdm_filter is
     port (
-        clk         : in  std_logic;  --! Main clock
-        rst         : in  std_logic;  --! High-active synchronous reset
-        window_i    : in  std_logic_vector(7 downto 0);  --! Window size from sensitivity_ctrl
-        pdm_data_i  : in  std_logic;  --! PDM bit from pdm_driver
-        pdm_valid_i : in  std_logic;  --! Valid PDM bit pulse from pdm_driver
-        pcm_data_o  : out std_logic_vector(7 downto 0);  --! Amplitude value 0-255
-        pcm_valid_o : out std_logic   --! Single-cycle pulse = new amplitude ready
+        clk         : in  std_logic;
+        rst         : in  std_logic;
+        window_i    : in  std_logic_vector(7 downto 0);
+        pdm_data_i  : in  std_logic;
+        pdm_valid_i : in  std_logic;
+        pcm_data_o  : out std_logic_vector(7 downto 0);
+        pcm_valid_o : out std_logic
     );
 end entity pdm_filter;
--------------------------------------------------
-architecture Behavioral of pdm_filter is
-
-    signal sig_acc : unsigned(7 downto 0) := (others => '0');  --! Accumulator
-    signal sig_cnt : unsigned(7 downto 0) := (others => '0');  --! Sample counter
-
-begin
-
-    --! Accumulate PDM bits over window, output sum when window complete
-    p_filter : process (clk) is
-    begin
-        if rising_edge(clk) then
-            if rst = '1' then
-                sig_acc     <= (others => '0');
-                sig_cnt     <= (others => '0');
-                pcm_data_o  <= (others => '0');
-                pcm_valid_o <= '0';
-            else
-                pcm_valid_o <= '0';  -- Default: no output pulse
-
-                if pdm_valid_i = '1' then
-                    -- Window complete: output result and reset
-                    if sig_cnt >= unsigned(window_i) - 1 then
-                        pcm_data_o  <= std_logic_vector(sig_acc);
-                        pcm_valid_o <= '1';
-                        sig_cnt     <= (others => '0');
-                        -- Start fresh accumulator for next window
-                        if pdm_data_i = '1' then
-                            sig_acc <= to_unsigned(1, 8);
-                        else
-                            sig_acc <= (others => '0');
-                        end if;
-                    -- Still within window: accumulate
-                    else
-                        if pdm_data_i = '1' then
-                            sig_acc <= sig_acc + 1;
-                        end if;
-                        sig_cnt <= sig_cnt + 1;
-                    end if;
-                end if;
-            end if;
-        end if;
-    end process p_filter;
-
-end architecture Behavioral;
 ```
 
 #### Simulace (tb_pdm_filter)
 
-*Sem vlož screenshot z Vivado simulátoru po spuštění testbench.*
-
-> **Očekávané chování:** Po 64 validních PDM bitech se objeví pulz `pcm_valid_o = '1'` a `pcm_data_o` odpovídá počtu jedniček v okně.
+![Simulace pdm_filter](img/simulation_pdm_filter.png)
+*Obr. 1: Behaviorální simulace modulu pdm_filter. Signál pcm_data postupně nabývá hodnot:
+0x00 (ticho), 0x20 (střední hlasitost), 0x3E (hlasitý zvuk) a 0x11 po změně okna na 32 vzorků.*
 
 ---
 
-### led_bar
+### peak_hold
 
-Převede hodnotu amplitudy na počet rozsvícených LED.
+Drží maximální hodnotu amplitudy. BTNU přepíná Peak Hold on/off, BTND resetuje maximum na aktuální hodnotu.
 
 #### Porty
 
@@ -253,8 +253,45 @@ Převede hodnotu amplitudy na počet rozsvícených LED.
 |---|---|---|---|
 | `clk` | in | std_logic | Hlavní hodiny |
 | `rst` | in | std_logic | Synchronní reset |
-| `level_i` | in | unsigned(6 downto 0) | Amplituda 0–64 |
+| `btn_mode_i` | in | std_logic | BTNU – přepnutí Peak Hold |
+| `btn_reset_i` | in | std_logic | BTND – reset peak hodnoty |
+| `level_i` | in | std_logic_vector(7 downto 0) | Aktuální amplituda |
 | `valid_i` | in | std_logic | Nová platná hodnota |
+| `level_o` | out | std_logic_vector(7 downto 0) | Výstup (peak nebo přímá hodnota) |
+| `peak_active_o` | out | std_logic | '1' = Peak Hold je zapnutý |
+
+#### VHDL kód
+
+```vhdl
+entity peak_hold is
+    port (
+        clk           : in  std_logic;
+        rst           : in  std_logic;
+        btn_mode_i    : in  std_logic;
+        btn_reset_i   : in  std_logic;
+        level_i       : in  std_logic_vector(7 downto 0);
+        valid_i       : in  std_logic;
+        level_o       : out std_logic_vector(7 downto 0);
+        peak_active_o : out std_logic
+    );
+end entity peak_hold;
+```
+
+---
+
+### led_bar
+
+Převede amplitudu (0–255) na počet rozsvícených LED (0–16). Při aktivním Peak Hold bliká nejvyšší rozsvícená LED (~6 Hz).
+
+#### Porty
+
+| Port | Směr | Typ | Popis |
+|---|---|---|---|
+| `clk` | in | std_logic | Hlavní hodiny |
+| `rst` | in | std_logic | Synchronní reset |
+| `level_i` | in | std_logic_vector(7 downto 0) | Amplituda 0–255 |
+| `valid_i` | in | std_logic | Nová platná hodnota |
+| `peak_active_i` | in | std_logic | Peak Hold aktivní |
 | `led_o` | out | std_logic_vector(15 downto 0) | 16 LED výstupů |
 
 #### VHDL kód
@@ -262,72 +299,16 @@ Převede hodnotu amplitudy na počet rozsvícených LED.
 ```vhdl
 entity led_bar is
     port (
-        clk           : in  std_logic;  --! Main clock
-        rst           : in  std_logic;  --! High-active synchronous reset
-        level_i       : in  std_logic_vector(7 downto 0);  --! Amplitude 0-255
-        valid_i       : in  std_logic;  --! New amplitude pulse
-        peak_active_i : in  std_logic;  --! '1' = peak hold mode active
-        led_o         : out std_logic_vector(15 downto 0)  --! 16 LEDs output
+        clk           : in  std_logic;
+        rst           : in  std_logic;
+        level_i       : in  std_logic_vector(7 downto 0);
+        valid_i       : in  std_logic;
+        peak_active_i : in  std_logic;
+        led_o         : out std_logic_vector(15 downto 0)
     );
 end entity led_bar;
--------------------------------------------------
-architecture Behavioral of led_bar is
-
-    --! Scale 0-255 to 0-16 by taking upper 4 bits
-    signal sig_level  : integer range 0 to 16 := 0;
-
-    --! Blink generator for peak hold indication (~6 Hz @ 100 MHz)
-    signal sig_blink_cnt : unsigned(23 downto 0) := (others => '0');
-    signal sig_blink     : std_logic := '0';
-
-begin
-
-    --! Convert 8-bit amplitude to 0-16 range (divide by 16)
-    sig_level <= to_integer(unsigned(level_i(7 downto 4)));
-
-    --! Free-running blink counter
-    p_blink : process (clk) is
-    begin
-        if rising_edge(clk) then
-            if rst = '1' then
-                sig_blink_cnt <= (others => '0');
-                sig_blink     <= '0';
-            else
-                sig_blink_cnt <= sig_blink_cnt + 1;
-                -- Toggle every 2^23 cycles = ~84 ms = ~6 Hz blink
-                if sig_blink_cnt = 0 then
-                    sig_blink <= not sig_blink;
-                end if;
-            end if;
-        end if;
-    end process p_blink;
-
-    --! Update LED bar on each new amplitude value
-    p_led : process (clk) is
-    begin
-        if rising_edge(clk) then
-            if rst = '1' then
-                led_o <= (others => '0');
-            elsif valid_i = '1' then
-                led_o <= (others => '0');
-                for i in 0 to 15 loop
-                    if i < sig_level then
-                        -- Lit LEDs below peak level
-                        led_o(i) <= '1';
-                    elsif i = sig_level and peak_active_i = '1' then
-                        -- Top LED blinks when peak hold is active
-                        led_o(i) <= sig_blink;
-                    end if;
-                end loop;
-            end if;
-        end if;
-    end process p_led;
-
-end architecture Behavioral;
 ```
-<img width="1482" height="830" alt="image" src="https://github.com/user-attachments/assets/0e6ff2f1-5520-4856-bd2f-f80278f6f72d" />
-*Obr. 1: Behaviorální simulace modulu pdm_filter. Signál pcm_data postupně nabývá hodnot:
-0x00 (ticho), 0x20 (střední hlasitost), 0x3E (hlasitý zvuk) a 0x11 po změně okna na 32 vzorků.*
+
 ---
 
 ## Lab 3: Integration
@@ -363,3 +344,4 @@ end architecture Behavioral;
 - [PDM Microphone Datasheet – SPH0641LU4H-1](https://www.knowles.com/docs/default-source/default-document-library/sph0641lu4h-1-datasheet.pdf)
 - [tomas-fryza/vhdl-examples](https://github.com/tomas-fryza/vhdl-examples)
 - Vivado 2025.2
+- [draw.io](https://draw.io) – blokové schéma
