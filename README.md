@@ -260,26 +260,50 @@ Převede hodnotu amplitudy na počet rozsvícených LED.
 #### VHDL kód
 
 ```vhdl
-library IEEE;
-use IEEE.STD_LOGIC_1164.ALL;
-use IEEE.NUMERIC_STD.ALL;
-
 entity led_bar is
     port (
-        clk     : in  std_logic;
-        rst     : in  std_logic;
-        level_i : in  unsigned(6 downto 0);
-        valid_i : in  std_logic;
-        led_o   : out std_logic_vector(15 downto 0)
+        clk           : in  std_logic;  --! Main clock
+        rst           : in  std_logic;  --! High-active synchronous reset
+        level_i       : in  std_logic_vector(7 downto 0);  --! Amplitude 0-255
+        valid_i       : in  std_logic;  --! New amplitude pulse
+        peak_active_i : in  std_logic;  --! '1' = peak hold mode active
+        led_o         : out std_logic_vector(15 downto 0)  --! 16 LEDs output
     );
-end led_bar;
-
+end entity led_bar;
+-------------------------------------------------
 architecture Behavioral of led_bar is
-    signal level_scaled : integer range 0 to 16;
-begin
-    level_scaled <= to_integer(level_i(6 downto 2));
 
-    p_led : process(clk)
+    --! Scale 0-255 to 0-16 by taking upper 4 bits
+    signal sig_level  : integer range 0 to 16 := 0;
+
+    --! Blink generator for peak hold indication (~6 Hz @ 100 MHz)
+    signal sig_blink_cnt : unsigned(23 downto 0) := (others => '0');
+    signal sig_blink     : std_logic := '0';
+
+begin
+
+    --! Convert 8-bit amplitude to 0-16 range (divide by 16)
+    sig_level <= to_integer(unsigned(level_i(7 downto 4)));
+
+    --! Free-running blink counter
+    p_blink : process (clk) is
+    begin
+        if rising_edge(clk) then
+            if rst = '1' then
+                sig_blink_cnt <= (others => '0');
+                sig_blink     <= '0';
+            else
+                sig_blink_cnt <= sig_blink_cnt + 1;
+                -- Toggle every 2^23 cycles = ~84 ms = ~6 Hz blink
+                if sig_blink_cnt = 0 then
+                    sig_blink <= not sig_blink;
+                end if;
+            end if;
+        end if;
+    end process p_blink;
+
+    --! Update LED bar on each new amplitude value
+    p_led : process (clk) is
     begin
         if rising_edge(clk) then
             if rst = '1' then
@@ -287,14 +311,19 @@ begin
             elsif valid_i = '1' then
                 led_o <= (others => '0');
                 for i in 0 to 15 loop
-                    if i < level_scaled then
+                    if i < sig_level then
+                        -- Lit LEDs below peak level
                         led_o(i) <= '1';
+                    elsif i = sig_level and peak_active_i = '1' then
+                        -- Top LED blinks when peak hold is active
+                        led_o(i) <= sig_blink;
                     end if;
                 end loop;
             end if;
         end if;
-    end process;
-end Behavioral;
+    end process p_led;
+
+end architecture Behavioral;
 ```
 <img width="1482" height="830" alt="image" src="https://github.com/user-attachments/assets/0e6ff2f1-5520-4856-bd2f-f80278f6f72d" />
 *Obr. 1: Behaviorální simulace modulu pdm_filter. Signál pcm_data postupně nabývá hodnot:
