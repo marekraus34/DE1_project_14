@@ -177,58 +177,62 @@ Jednoduchý decimační akumulátor – počítá '1' v okně 64 PDM bitů. Výs
 #### VHDL kód
 
 ```vhdl
-library IEEE;
-use IEEE.STD_LOGIC_1164.ALL;
-use IEEE.NUMERIC_STD.ALL;
-
 entity pdm_filter is
-    generic (
-        G_WINDOW : positive := 64
-    );
     port (
-        clk         : in  std_logic;
-        rst         : in  std_logic;
-        pdm_data_i  : in  std_logic;
-        pdm_valid_i : in  std_logic;
-        pcm_data_o  : out unsigned(6 downto 0);
-        pcm_valid_o : out std_logic
+        clk         : in  std_logic;  --! Main clock
+        rst         : in  std_logic;  --! High-active synchronous reset
+        window_i    : in  std_logic_vector(7 downto 0);  --! Window size from sensitivity_ctrl
+        pdm_data_i  : in  std_logic;  --! PDM bit from pdm_driver
+        pdm_valid_i : in  std_logic;  --! Valid PDM bit pulse from pdm_driver
+        pcm_data_o  : out std_logic_vector(7 downto 0);  --! Amplitude value 0-255
+        pcm_valid_o : out std_logic   --! Single-cycle pulse = new amplitude ready
     );
-end pdm_filter;
-
+end entity pdm_filter;
+-------------------------------------------------
 architecture Behavioral of pdm_filter is
-    signal acc : unsigned(6 downto 0) := (others => '0');
-    signal cnt : integer range 0 to G_WINDOW-1 := 0;
+
+    signal sig_acc : unsigned(7 downto 0) := (others => '0');  --! Accumulator
+    signal sig_cnt : unsigned(7 downto 0) := (others => '0');  --! Sample counter
+
 begin
-    p_filter : process(clk)
+
+    --! Accumulate PDM bits over window, output sum when window complete
+    p_filter : process (clk) is
     begin
         if rising_edge(clk) then
             if rst = '1' then
-                acc         <= (others => '0');
-                cnt         <= 0;
+                sig_acc     <= (others => '0');
+                sig_cnt     <= (others => '0');
+                pcm_data_o  <= (others => '0');
                 pcm_valid_o <= '0';
             else
-                pcm_valid_o <= '0';
+                pcm_valid_o <= '0';  -- Default: no output pulse
+
                 if pdm_valid_i = '1' then
-                    if cnt = G_WINDOW - 1 then
-                        pcm_data_o  <= acc;
+                    -- Window complete: output result and reset
+                    if sig_cnt >= unsigned(window_i) - 1 then
+                        pcm_data_o  <= std_logic_vector(sig_acc);
                         pcm_valid_o <= '1';
+                        sig_cnt     <= (others => '0');
+                        -- Start fresh accumulator for next window
                         if pdm_data_i = '1' then
-                            acc <= to_unsigned(1, 7);
+                            sig_acc <= to_unsigned(1, 8);
                         else
-                            acc <= (others => '0');
+                            sig_acc <= (others => '0');
                         end if;
-                        cnt <= 0;
+                    -- Still within window: accumulate
                     else
                         if pdm_data_i = '1' then
-                            acc <= acc + 1;
+                            sig_acc <= sig_acc + 1;
                         end if;
-                        cnt <= cnt + 1;
+                        sig_cnt <= sig_cnt + 1;
                     end if;
                 end if;
             end if;
         end if;
-    end process;
-end Behavioral;
+    end process p_filter;
+
+end architecture Behavioral;
 ```
 
 #### Simulace (tb_pdm_filter)
